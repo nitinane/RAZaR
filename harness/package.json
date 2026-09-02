@@ -1,0 +1,46 @@
+{
+  "name": "harness",
+  "version": "1.0.0",
+  "description": "Auditable Decision Harness — Revenue Recovery Agent (Razorpay Buildathon)",
+  "type": "module",
+  "main": "dist/harness.js",
+  "types": "dist/harness.d.ts",
+  "scripts": {
+    "test": "npx tsx src/test-harness.ts",
+    "test:real": "npx tsx src/test-harness.ts",
+    "build": "npx tsc",
+    "typecheck": "npx tsc --noEmit",
+    "seed:generate": "npx tsx src/seed_failed_payments.ts > data/failed_payments_new.json",
+    "seed:db": "npx tsx src/seed_failed_payments.ts --seed --use-file",
+    "seed:db:fresh": "npx tsx src/seed_failed_payments.ts --seed",
+    "test:pipeline": "npx tsx src/test-pipeline.ts",
+    "eval:batch": "npx tsx src/runFullBatchEval.ts",
+    "replay:server": "npx tsx src/replayServer.ts"
+  },
+  "keywords": [
+    "harness",
+    "observability",
+    "replay",
+    "supabase",
+    "revenue-recovery"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.4",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/uuid": "^10.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "groq-sdk": "^1.6.0",
+    "razorpay": "^2.9.8",
+    "uuid": "^14.0.2",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  }
+}
