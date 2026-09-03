@@ -206,5 +206,4 @@ npm run eval:edge      # run the 30-record adversarial/edge-case stress test
 
 ## Team
 
-Built by Nitin — B.Sc. Computer Science, BITS Pilani (in partnership with
-NxtWave), Hyderabad.
+Built by Nitin
