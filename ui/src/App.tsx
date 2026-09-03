@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { AlertCircle, ArrowLeft } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { MetricsCards } from './components/MetricsCards';
 import { PaymentsTable } from './components/PaymentsTable';
@@ -8,18 +9,26 @@ import { DagTraceViewer } from './components/DagTraceViewer';
 import type { BatchEvalData, EvalPaymentRecord } from './types';
 import rawData from './data/batch_eval_results.json';
 
-const batchData = rawData as unknown as BatchEvalData;
+const batchData = (rawData ?? null) as unknown as BatchEvalData | null;
 
 export function App() {
   const [currentView, setCurrentView] = useState<'dashboard' | 'trace'>('dashboard');
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
-  // Sync with URL hash (e.g. #/trace/run_id or #/dashboard)
+  // Sync with URL hash (e.g. #/trace/run_id or #/dashboard) and path
   useEffect(() => {
-    const handleHashChange = () => {
-      const hash = window.location.hash;
+    const handleNavigation = () => {
+      const hash = window.location.hash || '';
+      const path = window.location.pathname || '';
+      let runId: string | null = null;
+
       if (hash.startsWith('#/trace/')) {
-        const runId = hash.replace('#/trace/', '');
+        runId = hash.replace('#/trace/', '').trim();
+      } else if (path.startsWith('/trace/')) {
+        runId = path.replace('/trace/', '').trim();
+      }
+
+      if (runId) {
         setSelectedRunId(runId);
         setCurrentView('trace');
       } else {
@@ -28,9 +37,13 @@ export function App() {
       }
     };
 
-    handleHashChange();
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    handleNavigation();
+    window.addEventListener('hashchange', handleNavigation);
+    window.addEventListener('popstate', handleNavigation);
+    return () => {
+      window.removeEventListener('hashchange', handleNavigation);
+      window.removeEventListener('popstate', handleNavigation);
+    };
   }, []);
 
   const handleSelectRun = (runId: string) => {
@@ -47,9 +60,16 @@ export function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const selectedRecord: EvalPaymentRecord | undefined = batchData.results.find(
-    (r) => r.pipeline.run_id === selectedRunId
+  const hasData = Boolean(
+    batchData &&
+    Array.isArray(batchData.results) &&
+    batchData.results.length > 0 &&
+    batchData.metrics
   );
+
+  const selectedRecord: EvalPaymentRecord | undefined = hasData
+    ? batchData!.results.find((r) => r.pipeline.run_id === selectedRunId)
+    : undefined;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -60,7 +80,20 @@ export function App() {
       />
 
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
-        {currentView === 'dashboard' ? (
+        {!hasData ? (
+          /* Empty / Missing Data State (PRD / Demo Safety) */
+          <div className="py-20 flex items-center justify-center">
+            <div className="max-w-md w-full p-8 text-center bg-slate-900 rounded-2xl border border-slate-800 shadow-xl">
+              <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center mx-auto mb-4 border border-amber-500/20">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <h3 className="text-lg font-bold text-slate-100">No batch results found</h3>
+              <p className="text-xs text-slate-400 mt-2 font-mono leading-relaxed">
+                No batch results found — run <code className="text-teal-400 bg-slate-950 px-2 py-1 rounded border border-slate-800">npm run eval:batch</code> to generate results
+              </p>
+            </div>
+          </div>
+        ) : currentView === 'dashboard' ? (
           <div className="flex flex-col gap-8">
             {/* Top Overview Banner */}
             <div className="bg-gradient-to-r from-teal-950/40 via-slate-900 to-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -79,29 +112,31 @@ export function App() {
               <div className="flex items-center gap-3 shrink-0">
                 <div className="text-right">
                   <div className="text-xs text-slate-400 uppercase font-mono font-medium">Dataset Status</div>
-                  <div className="text-sm font-bold text-emerald-400 font-mono">63 Records Verified</div>
+                  <div className="text-sm font-bold text-emerald-400 font-mono">
+                    {batchData!.results.length} Records Verified
+                  </div>
                 </div>
               </div>
             </div>
 
             {/* Metrics KPI Cards */}
             <section aria-label="Key Performance Indicators">
-              <MetricsCards metrics={batchData.metrics} />
+              <MetricsCards metrics={batchData!.metrics} />
             </section>
 
             {/* Unresolved Exceptions Section (PRD Section 7) */}
             <section aria-label="Unresolved Exceptions">
               <UnresolvedExceptionsSection
-                exceptions={batchData.metrics.unresolved_exceptions}
-                records={batchData.results}
+                exceptions={batchData!.metrics.unresolved_exceptions}
+                records={batchData!.results}
                 onSelectRun={handleSelectRun}
               />
             </section>
 
-            {/* All 63 Records Table */}
+            {/* Batch Records Table */}
             <section aria-label="Batch Records Table">
               <PaymentsTable
-                records={batchData.results}
+                records={batchData!.results}
                 onSelectRun={handleSelectRun}
               />
             </section>
@@ -112,17 +147,24 @@ export function App() {
             onBack={handleNavigateHome}
           />
         ) : (
-          <div className="p-12 text-center bg-slate-900 rounded-2xl border border-slate-800">
-            <h3 className="text-lg font-bold text-slate-200">Run Not Found</h3>
-            <p className="text-xs text-slate-400 mt-1">
+          /* Trace Not Found State */
+          <div className="max-w-lg mx-auto p-12 text-center bg-slate-900 rounded-2xl border border-slate-800 shadow-xl my-12">
+            <div className="w-12 h-12 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center mx-auto mb-4 border border-rose-500/20">
+              <AlertCircle className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-100">Trace not found for this run</h3>
+            <p className="text-xs text-slate-400 mt-2 font-mono">
               Could not find DAG trace for run ID: <code className="text-teal-400">{selectedRunId}</code>
             </p>
-            <button
-              onClick={handleNavigateHome}
-              className="mt-4 px-4 py-2 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs"
-            >
-              Back to Dashboard
-            </button>
+            <div className="mt-6">
+              <button
+                onClick={handleNavigateHome}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold text-xs transition-colors shadow-lg shadow-teal-500/20"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Back to Dashboard</span>
+              </button>
+            </div>
           </div>
         )}
       </main>

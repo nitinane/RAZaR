@@ -212,6 +212,7 @@ async function main() {
         policy_overridden: r.result.policy_overridden,
         decision_path: r.result.decision_path,
         duration_ms: r.duration_ms,
+        promise_tracking: r.result.promise_tracking,
       },
       trace: r.trace,
     })),

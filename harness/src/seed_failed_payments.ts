@@ -18,6 +18,7 @@
 //   SUPABASE_URL=<url> SUPABASE_KEY=<key> npx tsx src/seed_failed_payments.ts --seed --use-file
 // =============================================================
 
+import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";

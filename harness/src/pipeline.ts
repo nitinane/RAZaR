@@ -30,6 +30,7 @@ import { runStopRuleGuard } from "./agents/stopRuleGuard.js";
 import { runExecutionAgent } from "./agents/executionAgent.js";
 import { runDiagnosisAgent } from "./agents/diagnosisAgent.js";
 import { runActionDecisionAgent } from "./agents/actionDecisionAgent.js";
+import { runPromiseTracker } from "./agents/promiseTracker.js";
 
 import type {
   FailedPaymentRecord,
@@ -38,6 +39,7 @@ import type {
   PipelineConfig,
   RootCauseCategory,
   RecoveryAction,
+  PromiseTrackingData,
 } from "./types.js";
 
 // ─────────────────────────────────────────────────────────────
@@ -45,6 +47,11 @@ import type {
 // ─────────────────────────────────────────────────────────────
 
 const TABLE = "failed_payments";
+
+// Explicit column list for agent inference queries.
+// EXCLUDES true_root_cause and ambiguity so ground truth can NEVER leak into prompts.
+const AGENT_SELECT_COLUMNS =
+  "id, amount, currency, method, customer_id, mandate_id, failure_code, failure_reason_raw, attempt_number, max_attempts_allowed, created_at, agent_run_id, agent_diagnosis, agent_action, agent_outcome, agent_processed_at, promised_pay_by, promise_status";
 
 /**
  * Fetch a single payment record from Supabase.
@@ -56,7 +63,7 @@ export async function fetchPayment(
 ): Promise<FailedPaymentRecord> {
   const { data, error } = await db
     .from(TABLE)
-    .select("*")
+    .select(AGENT_SELECT_COLUMNS)
     .eq("id", payment_id)
     .single();
 
@@ -65,7 +72,7 @@ export async function fetchPayment(
       `[Pipeline] fetchPayment: payment "${payment_id}" not found — ${error?.message ?? "no data"}`
     );
   }
-  return data as FailedPaymentRecord;
+  return data as unknown as FailedPaymentRecord;
 }
 
 /**
@@ -78,7 +85,7 @@ export async function fetchPendingPayments(
 ): Promise<FailedPaymentRecord[]> {
   const { data, error } = await db
     .from(TABLE)
-    .select("*")
+    .select(AGENT_SELECT_COLUMNS)
     .is("agent_outcome", null)
     .order("created_at", { ascending: true })
     .limit(limit);
@@ -86,7 +93,7 @@ export async function fetchPendingPayments(
   if (error) {
     throw new Error(`[Pipeline] fetchPendingPayments failed: ${error.message}`);
   }
-  return (data ?? []) as FailedPaymentRecord[];
+  return (data ?? []) as unknown as FailedPaymentRecord[];
 }
 
 /**
@@ -100,22 +107,30 @@ async function updatePaymentOutcome(
   outcome: AgentOutcome,
   run_id: string,
   agent_diagnosis: string | null,
-  agent_action: string
+  agent_action: string,
+  promiseTracking?: PromiseTrackingData
 ): Promise<void> {
+  const updatePayload: Record<string, unknown> = {
+    agent_outcome: outcome,
+    agent_run_id: run_id,
+    agent_diagnosis,
+    agent_action,
+    agent_processed_at: new Date().toISOString(),
+  };
+
+  if (promiseTracking) {
+    updatePayload["promise_status"] = promiseTracking.promise_status;
+    updatePayload["promised_pay_by"] = promiseTracking.promised_pay_by;
+  }
+
   const { error } = await db
     .from(TABLE)
-    .update({
-      agent_outcome: outcome,
-      agent_run_id: run_id,
-      agent_diagnosis,
-      agent_action,
-      agent_processed_at: new Date().toISOString(),
-    })
+    .update(updatePayload)
     .eq("id", payment_id);
 
   if (error) {
-    throw new Error(
-      `[Pipeline] updatePaymentOutcome failed for "${payment_id}": ${error.message}`
+    console.warn(
+      `[Pipeline] updatePaymentOutcome warning for "${payment_id}": ${error.message}`
     );
   }
 }
@@ -159,9 +174,61 @@ export async function runPipeline(
   let used_llm = false;
   let policy_overridden = false;
 
-  if (!classification.confident) {
-    // ── Path A: Not confident → LLM Dual-Model Diagnosis ─────
-    used_llm = true;
+  try {
+    agent_diagnosis = classification.root_cause ?? null;
+
+    // ── Pre-check: If attempts already exceeded at creation, stop immediately before diagnosis
+    if (payment.attempt_number > payment.max_attempts_allowed) {
+      const { result: stopResult, node_id: sgNodeId } = await runStopRuleGuard(
+        harness,
+        run_id,
+        pcNodeId,
+        payment,
+        config.stopRule ?? {}
+      );
+      nodeIds.stop_rule_guard = sgNodeId;
+      decision_path =
+        `pre_classifier executed. attempt_number (${payment.attempt_number}) > max_attempts_allowed (${payment.max_attempts_allowed}) ` +
+        `at creation. stop_rule_guard blocked before diagnosis: ${stopResult.reason}`;
+
+      const { node_id: execNodeId } = await runExecutionAgent(
+        harness,
+        run_id,
+        sgNodeId,
+        payment,
+        "escalate_human",
+        config.execution ?? {}
+      );
+      nodeIds.execution_agent = execNodeId;
+
+      action_taken = "escalate_human";
+      agent_outcome = "stop_rule_hit";
+
+      await updatePaymentOutcome(
+        db,
+        payment.id,
+        agent_outcome,
+        run_id,
+        agent_diagnosis,
+        action_taken
+      );
+
+      return {
+        payment_id: payment.id,
+        run_id,
+        root_cause: agent_diagnosis ? (agent_diagnosis as RootCauseCategory) : undefined,
+        action_taken,
+        agent_outcome,
+        harness_node_ids: nodeIds,
+        decision_path,
+        used_llm: false,
+        policy_overridden: false,
+      };
+    }
+
+    if (!classification.confident) {
+      // ── Path A: Not confident → LLM Dual-Model Diagnosis ─────
+      used_llm = true;
 
     // Step 2a: Run Diagnosis Agent (8B -> 70B if confidence < 0.75)
     const diagnosis = await runDiagnosisAgent(
@@ -315,6 +382,24 @@ export async function runPipeline(
     }
   }
 
+  // ── Step: Promise-to-Pay Tracker (Track 03 Extension) ──────
+  let promiseTracking: PromiseTrackingData | undefined;
+
+  if (agent_outcome === "notify_customer_pending") {
+    const trackerResult = await runPromiseTracker(
+      harness,
+      run_id,
+      nodeIds.execution_agent ?? null,
+      payment
+    );
+    nodeIds.promise_tracker = trackerResult.node_id;
+    promiseTracking = {
+      promise_status: trackerResult.promise_status,
+      promised_pay_by: trackerResult.promised_pay_by,
+      escalation_status: trackerResult.escalation_status,
+    };
+  }
+
   // ── Write outcome back to the DB ───────────────────────────
   await updatePaymentOutcome(
     db,
@@ -322,7 +407,8 @@ export async function runPipeline(
     agent_outcome,
     run_id,
     agent_diagnosis,
-    action_taken
+    action_taken,
+    promiseTracking
   );
 
   return {
@@ -332,10 +418,58 @@ export async function runPipeline(
     action_taken,
     agent_outcome,
     harness_node_ids: nodeIds,
+    promise_tracking: promiseTracking,
     decision_path,
     used_llm,
     policy_overridden,
   };
+} catch (err) {
+  const errorMsg = (err as Error)?.message || String(err);
+  console.error(`[Pipeline Error] Payment "${payment?.id}" encountered an unhandled exception: ${errorMsg}`);
+
+  const safeOutcome: AgentOutcome = "escalated_to_human";
+  const safeAction: RecoveryAction = "escalate_human";
+
+  let execNodeId: string | undefined;
+  try {
+    const { node_id } = await runExecutionAgent(
+      harness,
+      run_id,
+      nodeIds.pre_classifier ?? null,
+      payment,
+      safeAction,
+      config.execution ?? {}
+    );
+    execNodeId = node_id;
+  } catch {
+    // ignore
+  }
+
+  try {
+    await updatePaymentOutcome(
+      db,
+      payment.id,
+      safeOutcome,
+      run_id,
+      agent_diagnosis,
+      safeAction
+    );
+  } catch {
+    // ignore
+  }
+
+  return {
+    payment_id: payment?.id ?? "unknown",
+    run_id,
+    root_cause: agent_diagnosis ? (agent_diagnosis as RootCauseCategory) : undefined,
+    action_taken: safeAction,
+    agent_outcome: safeOutcome,
+    harness_node_ids: { ...nodeIds, execution_agent: execNodeId },
+    decision_path: `Pipeline caught unhandled error: ${errorMsg}. Safely escalated to human review.`,
+    used_llm,
+    policy_overridden,
+  };
+}
 }
 
 // ─────────────────────────────────────────────────────────────

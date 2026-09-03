@@ -1,5 +1,6 @@
 import React from 'react';
 import { ShieldCheck, Activity, ArrowLeft } from 'lucide-react';
+import { LiveHealthIndicator } from './LiveHealthIndicator';
 
 interface NavbarProps {
   currentView: 'dashboard' | 'trace';
@@ -41,8 +42,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigateHome }) =
           </div>
         </div>
 
-        {/* Center / Right: Status & Model badges */}
+        {/* Center / Right: Status & Model badges & Live Health */}
         <div className="flex items-center gap-3">
+          {/* Live Dependency Health Indicator (Groq + Supabase) */}
+          <LiveHealthIndicator />
+
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700/60 text-xs font-mono text-slate-300">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             <span>Groq: openai/gpt-oss-20b + 120b</span>

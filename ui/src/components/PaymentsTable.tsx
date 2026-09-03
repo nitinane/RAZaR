@@ -9,7 +9,7 @@ import {
   UserCheck, 
   AlertOctagon
 } from 'lucide-react';
-import type { EvalPaymentRecord, AgentOutcome } from '../types';
+import type { EvalPaymentRecord, AgentOutcome, PromiseTrackingData } from '../types';
 
 interface PaymentsTableProps {
   records: EvalPaymentRecord[];
@@ -19,6 +19,52 @@ interface PaymentsTableProps {
 export const PaymentsTable: React.FC<PaymentsTableProps> = ({ records, onSelectRun }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedOutcome, setSelectedOutcome] = useState<string>('all');
+
+  const getPromiseBadge = (tracking?: PromiseTrackingData) => {
+    if (!tracking || !tracking.promise_status || tracking.promise_status === 'none') {
+      return null;
+    }
+
+    if (tracking.promise_status === 'kept' || tracking.escalation_status === 'resolved') {
+      return (
+        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+          P2P: Kept
+        </span>
+      );
+    }
+
+    if (tracking.escalation_status === 'overdue_gentle') {
+      return (
+        <span
+          className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20"
+          title={`Deadline: ${tracking.promised_pay_by ?? 'N/A'}`}
+        >
+          P2P: Overdue (Gentle)
+        </span>
+      );
+    }
+
+    if (tracking.escalation_status === 'overdue_firm') {
+      return (
+        <span
+          className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20"
+          title={`Deadline: ${tracking.promised_pay_by ?? 'N/A'}`}
+        >
+          P2P: Overdue (Firm)
+        </span>
+      );
+    }
+
+    // Default / on_track
+    return (
+      <span
+        className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700"
+        title={`Deadline: ${tracking.promised_pay_by ?? 'N/A'}`}
+      >
+        P2P: On Track
+      </span>
+    );
+  };
 
   const formatInr = (paise: number) => {
     return new Intl.NumberFormat('en-IN', {
@@ -142,8 +188,25 @@ export const PaymentsTable: React.FC<PaymentsTableProps> = ({ records, onSelectR
           <tbody className="divide-y divide-slate-800/60 bg-slate-900/40">
             {filteredRecords.length === 0 ? (
               <tr>
-                <td colSpan={7} className="py-8 text-center text-slate-500">
-                  No records match the current filter.
+                <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <div className="flex flex-col items-center justify-center gap-2">
+                    <Search className="w-6 h-6 text-slate-500 stroke-[1.5]" />
+                    <span className="font-semibold text-slate-300 text-sm">No records match your filter</span>
+                    <p className="text-[11px] text-slate-500 font-mono max-w-sm">
+                      Try adjusting your search query or switching outcome filter.
+                    </p>
+                    {(searchTerm || selectedOutcome !== 'all') && (
+                      <button
+                        onClick={() => {
+                          setSearchTerm('');
+                          setSelectedOutcome('all');
+                        }}
+                        className="mt-1 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-teal-400 text-xs font-mono transition-colors"
+                      >
+                        Clear filters
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -198,9 +261,13 @@ export const PaymentsTable: React.FC<PaymentsTableProps> = ({ records, onSelectR
                     </span>
                   </td>
 
-                  {/* Outcome */}
+                  {/* Outcome & Promise-to-Pay Status */}
                   <td className="py-3 px-4">
-                    {getOutcomeBadge(rec.pipeline.agent_outcome)}
+                    <div className="flex flex-col gap-1 items-start">
+                      {getOutcomeBadge(rec.pipeline.agent_outcome)}
+                      {rec.pipeline.agent_outcome === 'notify_customer_pending' &&
+                        getPromiseBadge(rec.pipeline.promise_tracking)}
+                    </div>
                   </td>
 
                   {/* View Trace Button */}

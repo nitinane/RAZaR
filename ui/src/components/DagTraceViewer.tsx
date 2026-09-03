@@ -13,7 +13,10 @@ import {
   Layers,
   X,
   Play,
-  RotateCcw
+  RotateCcw,
+  AlertCircle,
+  Info,
+  Sparkles
 } from 'lucide-react';
 import type { EvalPaymentRecord, HarnessTreeNode, AgentOutcome } from '../types';
 
@@ -47,6 +50,40 @@ interface ReplayResult {
   cost_saved_usd: number;
   cost_saved_pct: number;
 }
+
+// Plain-language translations for non-technical viewers (judges, business stakeholders)
+const AGENT_PLAIN_DESCRIPTIONS: Record<string, string> = {
+  pre_classifier: "Quick rule-based check: does this failure match a known pattern?",
+  diagnosis_agent: "AI model reads the failure and decides what likely caused it",
+  policy_guard: "A safety check that can override the AI if its suggested action seems risky",
+  action_decision_agent: "A safety check that can override the AI if its suggested action seems risky",
+  stop_rule_guard: "Checks whether this payment has already been retried too many times or exceeds a spending limit",
+  execution_agent: "Actually carries out the decided action (retry the payment, notify the customer, or hand off to a person)",
+  promise_tracker: "Tracks whether the customer follows through after being notified",
+};
+
+const OUTCOME_PLAIN_EXPLANATIONS: Record<string, { icon: string; title: string; description: string }> = {
+  resolved: {
+    icon: "✅",
+    title: "Payment Successfully Recovered",
+    description: "This payment was successfully recovered.",
+  },
+  notify_customer_pending: {
+    icon: "📩",
+    title: "Customer Notified to Act",
+    description: "This couldn't be auto-fixed, so the customer was notified to take action.",
+  },
+  escalated_to_human: {
+    icon: "🙋",
+    title: "Handed to a Person",
+    description: "This was too uncertain for the AI to decide safely, so it was handed to a person.",
+  },
+  stop_rule_hit: {
+    icon: "🛑",
+    title: "Stopped by Safety Limits",
+    description: "This payment had already been retried the maximum allowed times, so the system safely stopped instead of trying again.",
+  },
+};
 
 export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }) => {
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
@@ -130,6 +167,7 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
   // Handle open Fork & Replay dialog
   const handleOpenFork = (node: HarnessTreeNode) => {
     setForkingNode(node);
+    setReplayError(null);
     // Pre-populate with the failure_reason_raw or input JSON
     if (node.input.failure_reason_raw) {
       setEditedInputText(node.input.failure_reason_raw);
@@ -143,16 +181,41 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
   // against the live Groq API and persists the sibling fork via harness.replayNode().
   const handleExecuteReplay = async () => {
     if (!forkingNode) return;
+
+    // Reject overly large input strings
+    if (editedInputText.length > 10000) {
+      setReplayError("Input text exceeds safe size limit (max 10,000 characters).");
+      return;
+    }
+
     setIsReplaying(true);
     setReplayError(null);
 
     // Build modified_input: merge original node input with the user's edited text.
     // If the textarea contains plain text (not JSON), treat it as the new failure_reason_raw.
-    // If it contains valid JSON, merge it over the original input.
+    // If it contains valid JSON, merge it over the original input with depth check.
     let modifiedInput: Record<string, any> = { ...forkingNode.input };
     try {
       const parsed = JSON.parse(editedInputText);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        // Enforce max depth 3
+        const getDepth = (o: any, d = 1): number => {
+          if (!o || typeof o !== 'object') return d;
+          let max = d;
+          for (const val of Object.values(o)) {
+            if (typeof val === 'object' && val !== null) {
+              max = Math.max(max, getDepth(val, d + 1));
+            }
+          }
+          return max;
+        };
+
+        if (getDepth(parsed) > 3) {
+          setReplayError("JSON nesting depth exceeds safe limit (max 3 levels).");
+          setIsReplaying(false);
+          return;
+        }
+
         modifiedInput = { ...modifiedInput, ...parsed };
       } else {
         modifiedInput.failure_reason_raw = editedInputText;
@@ -174,8 +237,26 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
       });
 
       if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({ error: resp.statusText }));
-        throw new Error(errBody.error ?? `Server returned ${resp.status}`);
+        let errorReason = `Server returned HTTP ${resp.status}`;
+        try {
+          const errBody = await resp.json();
+          if (errBody?.error) {
+            errorReason = errBody.error;
+          } else if (errBody?.message) {
+            errorReason = errBody.message;
+          }
+        } catch {
+          if (resp.status === 429) {
+            errorReason = 'Rate limit exceeded: Maximum 10 replay requests per minute per IP. Please wait a moment.';
+          } else if (resp.status === 503) {
+            errorReason = 'Database service unavailable: Live Supabase connection required for replay.';
+          } else if (resp.status === 404) {
+            errorReason = `Node "${forkingNode.node_id}" was not found in the active dataset.`;
+          } else if (resp.status === 413) {
+            errorReason = 'Payload too large: Replay input exceeds the 10KB safety limit.';
+          }
+        }
+        throw new Error(errorReason);
       }
 
       const data: { ok: boolean; original: ReplayHarnessNode; replay: ReplayHarnessNode } = await resp.json();
@@ -199,7 +280,11 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
       }));
       setForkingNode(null);
     } catch (err) {
-      setReplayError((err as Error).message ?? String(err));
+      let msg = (err as Error).message ?? String(err);
+      if ((err as Error).name === 'TypeError' && msg.toLowerCase().includes('fetch')) {
+        msg = 'Cannot reach replay server (http://localhost:3001). Please ensure "npm run replay:server" is running.';
+      }
+      setReplayError(msg);
     } finally {
       setIsReplaying(false);
     }
@@ -266,6 +351,21 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
           </div>
         </div>
 
+        {/* Top-of-page summary banner (Plain-English Explainer for non-technical viewers) */}
+        <div className="mb-8 p-4 rounded-xl bg-slate-950/80 border border-teal-500/30 flex items-start gap-3.5 shadow-md">
+          <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400 shrink-0 mt-0.5 border border-teal-500/20">
+            <Info className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-teal-300 font-mono mb-1">
+              In Plain Terms: How This Decision Was Made
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              This shows every step our AI system took to decide what to do about this failed payment — from figuring out why it failed, to checking it against safety rules, to taking action. Nothing here is hidden or summarized after the fact.
+            </p>
+          </div>
+        </div>
+
         {/* Vertical DAG Tree */}
         <div className="flex flex-col items-center gap-4">
           {flatNodes.map((node, index) => {
@@ -309,6 +409,8 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
                               ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
                               : node.agent_name === 'action_decision_agent'
                               ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                              : node.agent_name === 'promise_tracker'
+                              ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
                               : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                           }`}
                         >
@@ -332,14 +434,18 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
                               </span>
                             )}
                           </div>
-                          <div className="text-[11px] font-mono text-slate-400 mt-0.5 flex items-center gap-3">
-                            <span>ID: <code className="text-slate-300">{node.node_id.slice(0, 8)}</code></span>
+                          {/* Plain-Language Subtitle for non-technical viewers */}
+                          <div className="text-xs text-slate-400 mt-0.5 font-normal leading-snug">
+                            {AGENT_PLAIN_DESCRIPTIONS[node.agent_name] ?? "Automated step executed in the decision chain"}
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500 mt-1 flex items-center gap-3">
+                            <span>ID: <code className="text-slate-400">{node.node_id.slice(0, 8)}</code></span>
                             {node.confidence !== null && (
                               <span>Conf: <code className="text-emerald-400 font-semibold">{Math.round(node.confidence * 100)}%</code></span>
                             )}
-                            <span>Latency: <code className="text-slate-300">{node.latency_ms}ms</code></span>
+                            <span>Latency: <code className="text-slate-400">{node.latency_ms}ms</code></span>
                             {node.cost_estimate !== null && (
-                              <span>Cost: <code className="text-slate-300">${node.cost_estimate.toFixed(5)}</code></span>
+                              <span>Cost: <code className="text-slate-400">${node.cost_estimate.toFixed(5)}</code></span>
                             )}
                           </div>
                         </div>
@@ -348,14 +454,19 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
                       {/* Header Actions */}
                       <div className="flex items-center gap-2">
                         {isCanFork && !replayBranch && (
-                          <button
-                            onClick={() => handleOpenFork(node)}
-                            className="px-2.5 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-teal-300 border border-teal-500/30 hover:border-teal-500/50 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
-                            title="Fork this node with modified input to test what-if scenarios"
-                          >
-                            <GitFork className="w-3.5 h-3.5" />
-                            <span>Fork & Replay</span>
-                          </button>
+                          <div className="flex flex-col items-end gap-0.5">
+                            <button
+                              onClick={() => handleOpenFork(node)}
+                              className="px-2.5 py-1.5 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-teal-300 border border-teal-500/30 hover:border-teal-500/50 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                              title="Fork this node with modified input to test what-if scenarios"
+                            >
+                              <GitFork className="w-3.5 h-3.5" />
+                              <span>Fork & Replay</span>
+                            </button>
+                            <span className="text-[10px] text-slate-500 hidden sm:inline font-mono">
+                              what-if test
+                            </span>
+                          </div>
                         )}
 
                         <button
@@ -526,6 +637,36 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
               </React.Fragment>
             );
           })}
+
+          {/* Connector down to final conclusion */}
+          <div className="flex flex-col items-center my-0.5">
+            <div className="w-0.5 h-6 bg-slate-700"></div>
+            <ChevronDown className="w-4 h-4 text-slate-500 -mt-1" />
+          </div>
+
+          {/* Plain-Language Final Outcome Summary Card */}
+          <div className="w-full max-w-2xl bg-slate-950/90 border border-slate-800 rounded-xl p-5 shadow-lg flex items-start gap-4">
+            <span className="text-2xl shrink-0 select-none">
+              {OUTCOME_PLAIN_EXPLANATIONS[record.pipeline.agent_outcome]?.icon ?? "ℹ️"}
+            </span>
+            <div className="flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-teal-400 font-mono">
+                  Final Decision Outcome
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-900 text-slate-400 border border-slate-800">
+                  {record.pipeline.agent_outcome}
+                </span>
+              </div>
+              <h4 className="text-sm font-bold text-slate-100 mt-1">
+                {OUTCOME_PLAIN_EXPLANATIONS[record.pipeline.agent_outcome]?.title ?? "Pipeline Complete"}
+              </h4>
+              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                {OUTCOME_PLAIN_EXPLANATIONS[record.pipeline.agent_outcome]?.description ??
+                  "Autonomous pipeline evaluation complete."}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -552,6 +693,14 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
             </div>
 
             <div className="mt-4 flex flex-col gap-4">
+              {/* Plain-Language Fork & Replay Explainer */}
+              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-teal-500/30 text-xs text-slate-300 leading-relaxed flex items-start gap-2.5 shadow-sm">
+                <Sparkles className="w-4 h-4 text-teal-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-teal-300">What-if Simulator:</span> This lets you change one detail and see if the AI would have decided differently — without affecting the original record.
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold uppercase font-mono text-slate-300 mb-1.5">
                   Edit Input Parameter (e.g. modify failure reason or mandate status)
@@ -571,8 +720,11 @@ export const DagTraceViewer: React.FC<DagTraceViewerProps> = ({ record, onBack }
                 The result renders as a side-by-side comparison below the original node.
               </div>
               {replayError && (
-                <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/40 text-xs text-rose-300 font-mono">
-                  <strong>Replay failed:</strong> {replayError}
+                <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/50 text-xs text-rose-300 font-mono flex items-start gap-2.5 shadow-lg">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 leading-relaxed">
+                    <strong className="text-rose-200">Replay failed:</strong> {replayError}
+                  </div>
                 </div>
               )}
             </div>

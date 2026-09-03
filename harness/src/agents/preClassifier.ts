@@ -156,7 +156,8 @@ const PATTERNS: Pattern[] = [
 // ─────────────────────────────────────────────────────────────
 
 function classify(payment: Pick<FailedPaymentRecord, "failure_code" | "failure_reason_raw">): ClassificationResult {
-  const { failure_code, failure_reason_raw } = payment;
+  const failure_code = payment.failure_code ?? "";
+  const failure_reason_raw = payment.failure_reason_raw ?? "";
 
   // Try each pattern in priority order — first match wins
   for (const pattern of PATTERNS) {

@@ -35,6 +35,20 @@ export type AgentOutcome =
   | "pending";                 // in-flight (should not appear in final state)
 
 // ─────────────────────────────────────────────────────────────
+// Promise-to-Pay (P2P) Tracking Types (Track 03 Extension)
+// ─────────────────────────────────────────────────────────────
+
+export type PromiseStatus = "none" | "pending" | "kept" | "broken";
+export type PromiseEscalationStatus = "on_track" | "overdue_gentle" | "overdue_firm" | "resolved";
+
+export interface PromiseTrackingData {
+  promise_status: PromiseStatus;
+  promised_pay_by: string | null;
+  escalation_status?: PromiseEscalationStatus;
+  days_overdue?: number;
+}
+
+// ─────────────────────────────────────────────────────────────
 // failed_payments table row (as read from Supabase)
 // ─────────────────────────────────────────────────────────────
 
@@ -51,6 +65,10 @@ export interface FailedPaymentRecord {
   attempt_number: number;
   max_attempts_allowed: number;
   created_at: string;
+
+  // Promise-to-Pay tracking fields
+  promised_pay_by?: string | null;
+  promise_status?: PromiseStatus | null;
 
   // Ground truth — eval layer ONLY, never given to agents at inference time
   true_root_cause?: RootCauseCategory;
@@ -174,7 +192,10 @@ export interface PipelineResult {
     diagnosis_agent?: string;
     action_decision_agent?: string;
     execution_agent?: string;
+    promise_tracker?: string;
   };
+  /** Promise-to-Pay tracking state (set when outcome is notify_customer_pending). */
+  promise_tracking?: PromiseTrackingData;
   /** Reason the pipeline took this path (for logging/display). */
   decision_path: string;
   /** True if the LLM path was used (diagnosis + action-decision agents). */

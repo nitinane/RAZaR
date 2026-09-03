@@ -17,6 +17,16 @@ export type RecoveryAction =
   | "notify_customer"
   | "escalate_human";
 
+export type PromiseStatus = "none" | "pending" | "kept" | "broken";
+export type PromiseEscalationStatus = "on_track" | "overdue_gentle" | "overdue_firm" | "resolved";
+
+export interface PromiseTrackingData {
+  promise_status: PromiseStatus;
+  promised_pay_by: string | null;
+  escalation_status?: PromiseEscalationStatus;
+  days_overdue?: number;
+}
+
 export interface HarnessTreeNode {
   node_id: string;
   run_id: string;
@@ -54,6 +64,7 @@ export interface EvalPaymentRecord {
     policy_overridden: boolean;
     decision_path: string;
     duration_ms: number;
+    promise_tracking?: PromiseTrackingData;
   };
   trace: HarnessTreeNode[];
 }

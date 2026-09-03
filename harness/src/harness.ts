@@ -197,6 +197,21 @@ export class DecisionHarness {
     return buildTree(nodes);
   }
 
+  /**
+   * Fetches a single node by node_id from Supabase.
+   * Returns null if not found.
+   */
+  async getNode(node_id: string): Promise<HarnessNode | null> {
+    const { data, error } = await this.db
+      .from(this.TABLE)
+      .select("*")
+      .eq("node_id", node_id)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return data as HarnessNode;
+  }
+
   // ── 2c. replayNode ─────────────────────────────────────────
 
   /**
